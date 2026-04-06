@@ -111,6 +111,10 @@ pub struct PhysicalDeviceFeatures {
 
     /// Features provided by `VK_EXT_subgroup_size_control`, promoted to Vulkan 1.3.
     subgroup_size_control: Option<vk::PhysicalDeviceSubgroupSizeControlFeatures<'static>>,
+
+    /// Features provided by `VK_EXT_host_query_reset`, promoted to Vulkan 1.2.
+    /// Required by libplacebo for Vulkan device import.
+    host_query_reset: Option<vk::PhysicalDeviceHostQueryResetFeatures<'static>>,
 }
 
 impl PhysicalDeviceFeatures {
@@ -158,6 +162,9 @@ impl PhysicalDeviceFeatures {
             info = info.push_next(feature);
         }
         if let Some(ref mut feature) = self.subgroup_size_control {
+            info = info.push_next(feature);
+        }
+        if let Some(ref mut feature) = self.host_query_reset {
             info = info.push_next(feature);
         }
         info
@@ -447,6 +454,13 @@ impl PhysicalDeviceFeatures {
                     vk::PhysicalDeviceSubgroupSizeControlFeatures::default()
                         .subgroup_size_control(true),
                 )
+            } else {
+                None
+            },
+            host_query_reset: if device_api_version >= vk::API_VERSION_1_2
+                || enabled_extensions.contains(&ext::host_query_reset::NAME)
+            {
+                Some(vk::PhysicalDeviceHostQueryResetFeatures::default().host_query_reset(true))
             } else {
                 None
             },
@@ -952,6 +966,28 @@ impl PhysicalDeviceProperties {
         // Optional `VK_KHR_swapchain_mutable_format`
         if self.supports_extension(khr::swapchain_mutable_format::NAME) {
             extensions.push(khr::swapchain_mutable_format::NAME);
+        }
+
+        // Optional Vulkan Video Decode extensions.
+        // These don't affect wgpu's rendering pipeline but allow applications
+        // sharing this VkDevice (e.g. via as_hal) to use hardware video decode
+        // without a separate device and costly cross-device memory copies.
+        // Extensions are chained per Vulkan spec dependency requirements:
+        //   video_queue <- video_decode_queue <- codec extensions (h264/h265/av1)
+        if self.supports_extension(khr::video_queue::NAME) {
+            extensions.push(khr::video_queue::NAME);
+            if self.supports_extension(khr::video_decode_queue::NAME) {
+                extensions.push(khr::video_decode_queue::NAME);
+                for ext in [
+                    khr::video_decode_h264::NAME,
+                    khr::video_decode_h265::NAME,
+                    khr::video_decode_av1::NAME,
+                ] {
+                    if self.supports_extension(ext) {
+                        extensions.push(ext);
+                    }
+                }
+            }
         }
 
         // Optional `VK_EXT_robustness2`
@@ -1833,6 +1869,7 @@ impl super::Adapter {
             render_passes: Mutex::new(Default::default()),
             framebuffers: Mutex::new(Default::default()),
             memory_allocations_counter: Default::default(),
+            queue_lock: Arc::new(Mutex::new(())),
         });
 
         let relay_semaphores = super::RelaySemaphores::new(&shared)?;
@@ -1962,10 +1999,41 @@ impl crate::Adapter for super::Adapter {
         let mut enabled_phd_features = self.physical_device_features(&enabled_extensions, features);
 
         let family_index = 0; //TODO
-        let family_info = vk::DeviceQueueCreateInfo::default()
+
+        // Must outlive `family_infos` -- DeviceQueueCreateInfo stores a raw
+        // pointer to this slice. Rust drops locals in reverse declaration order,
+        // so this is dropped after family_infos.
+        let queue_priorities = [1.0f32];
+
+        let mut family_infos = vec![vk::DeviceQueueCreateInfo::default()
             .queue_family_index(family_index)
-            .queue_priorities(&[1.0]);
-        let family_infos = [family_info];
+            .queue_priorities(&queue_priorities)];
+
+        // If video decode extensions are enabled, also request queues from
+        // video decode queue families so that external consumers sharing this
+        // VkDevice (e.g. FFmpeg via libplacebo) can obtain decode queues via
+        // vkGetDeviceQueue.
+        if enabled_extensions.contains(&khr::video_decode_queue::NAME) {
+            let queue_families = unsafe {
+                self.instance
+                    .raw
+                    .get_physical_device_queue_family_properties(self.raw)
+            };
+            for (idx, family) in queue_families.iter().enumerate() {
+                let idx = idx as u32;
+                if idx != family_index
+                    && family
+                        .queue_flags
+                        .contains(vk::QueueFlags::VIDEO_DECODE_KHR)
+                {
+                    family_infos.push(
+                        vk::DeviceQueueCreateInfo::default()
+                            .queue_family_index(idx)
+                            .queue_priorities(&queue_priorities),
+                    );
+                }
+            }
+        }
 
         let str_pointers = enabled_extensions
             .iter()
@@ -1991,7 +2059,7 @@ impl crate::Adapter for super::Adapter {
                 &enabled_extensions,
                 features,
                 memory_hints,
-                family_info.queue_family_index,
+                family_index,
                 0,
             )
         }
