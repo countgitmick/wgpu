@@ -529,6 +529,9 @@ struct DeviceShared {
     render_passes: Mutex<rustc_hash::FxHashMap<RenderPassKey, vk::RenderPass>>,
     framebuffers: Mutex<rustc_hash::FxHashMap<FramebufferKey, vk::Framebuffer>>,
     memory_allocations_counter: InternalCounter,
+    /// Host-side lock for externally-synchronized `VkQueue` operations.
+    /// See [`Device::queue_lock()`] for details.
+    queue_lock: Arc<Mutex<()>>,
 }
 
 pub struct Device {
@@ -1062,6 +1065,7 @@ impl crate::Queue for Queue {
         }
 
         profiling::scope!("vkQueueSubmit");
+        let _queue_guard = self.device.queue_lock.lock();
         unsafe {
             self.device
                 .raw
@@ -1088,6 +1092,7 @@ impl crate::Queue for Queue {
 
         let suboptimal = {
             profiling::scope!("vkQueuePresentKHR");
+            let _queue_guard = self.device.queue_lock.lock();
             unsafe { self.swapchain_fn.queue_present(self.raw, &vk_info) }.map_err(|error| {
                 match error {
                     vk::Result::ERROR_OUT_OF_DATE_KHR => crate::SurfaceError::Outdated,
