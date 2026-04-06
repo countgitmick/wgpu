@@ -832,6 +832,21 @@ impl super::Device {
     pub fn shared_instance(&self) -> &super::InstanceShared {
         &self.shared.instance
     }
+
+    /// Returns the queue submission lock.
+    ///
+    /// External consumers sharing this `VkDevice` (e.g. via `as_hal`) must
+    /// acquire this lock before calling any externally-synchronized queue
+    /// operation (`vkQueueSubmit`, `vkQueuePresentKHR`, `vkQueueWaitIdle`,
+    /// `vkQueueBindSparse`) on the queue returned by [`raw_queue()`], and
+    /// release it afterward. wgpu acquires this lock internally for its own
+    /// submissions.
+    ///
+    /// The lock is only valid for the lifetime of this device. Do not use
+    /// a cloned `Arc` after the device has been destroyed.
+    pub fn queue_lock(&self) -> &Arc<Mutex<()>> {
+        &self.shared.queue_lock
+    }
 }
 
 impl crate::Device for super::Device {
