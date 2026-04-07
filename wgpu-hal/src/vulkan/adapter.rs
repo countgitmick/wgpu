@@ -1870,6 +1870,7 @@ impl super::Adapter {
             framebuffers: Mutex::new(Default::default()),
             memory_allocations_counter: Default::default(),
             queue_lock: Arc::new(Mutex::new(())),
+            external_wait_semaphores: Mutex::new(Vec::new()),
         });
 
         let relay_semaphores = super::RelaySemaphores::new(&shared)?;

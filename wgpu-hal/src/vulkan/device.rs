@@ -847,6 +847,27 @@ impl super::Device {
     pub fn queue_lock(&self) -> &Arc<Mutex<()>> {
         &self.shared.queue_lock
     }
+
+    /// Inject an external semaphore into the next queue submission's wait list.
+    ///
+    /// For timeline semaphores, `value` is the counter value to wait for.
+    /// For binary semaphores, pass `None` (treated as 0).
+    /// `stage_mask` specifies which pipeline stages wait on this semaphore.
+    ///
+    /// The semaphore is consumed by the very next `vkQueueSubmit` and
+    /// removed from the list. Callers must re-inject each frame if needed.
+    pub fn add_wait_semaphore(
+        &self,
+        semaphore: vk::Semaphore,
+        value: Option<u64>,
+        stage_mask: vk::PipelineStageFlags,
+    ) {
+        self.shared.external_wait_semaphores.lock().push((
+            semaphore,
+            value.unwrap_or(0),
+            stage_mask,
+        ));
+    }
 }
 
 impl crate::Device for super::Device {

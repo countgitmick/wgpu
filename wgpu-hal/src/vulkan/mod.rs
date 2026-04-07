@@ -534,6 +534,10 @@ struct DeviceShared {
     /// (e.g. via `as_hal`) must acquire this lock before submitting to
     /// the queue returned by [`Device::raw_queue()`].
     queue_lock: Arc<Mutex<()>>,
+    /// External semaphores to wait on in the next `vkQueueSubmit`.
+    /// Tuple: (semaphore, timeline_value, stage_mask).
+    /// Binary semaphores use value 0. Drained on every submit call.
+    external_wait_semaphores: Mutex<Vec<(vk::Semaphore, u64, vk::PipelineStageFlags)>>,
 }
 
 pub struct Device {
@@ -966,6 +970,7 @@ impl crate::Queue for Queue {
 
         let mut wait_stage_masks = Vec::new();
         let mut wait_semaphores = Vec::new();
+        let mut wait_values: Vec<u64> = Vec::new();
         let mut signal_semaphores = Vec::new();
         let mut signal_values = Vec::new();
 
@@ -1001,6 +1006,7 @@ impl crate::Queue for Queue {
             if let Some(sem) = swapchain_semaphore.get_acquire_wait_semaphore() {
                 wait_stage_masks.push(vk::PipelineStageFlags::TOP_OF_PIPE);
                 wait_semaphores.push(sem);
+                wait_values.push(0); // binary semaphore
             }
 
             // Get a semaphore to signal when we're done writing to this surface
@@ -1017,6 +1023,17 @@ impl crate::Queue for Queue {
         if let Some(sem) = semaphore_state.wait {
             wait_stage_masks.push(vk::PipelineStageFlags::TOP_OF_PIPE);
             wait_semaphores.push(sem);
+            wait_values.push(0); // binary semaphore
+        }
+
+        // Drain external wait semaphores injected via Device::add_wait_semaphore().
+        {
+            let mut ext = self.device.external_wait_semaphores.lock();
+            for (sem, value, stage) in ext.drain(..) {
+                wait_semaphores.push(sem);
+                wait_stage_masks.push(stage);
+                wait_values.push(value);
+            }
         }
 
         signal_semaphores.push(semaphore_state.signal);
@@ -1061,8 +1078,9 @@ impl crate::Queue for Queue {
         let mut vk_timeline_info;
 
         if self.device.private_caps.timeline_semaphores {
-            vk_timeline_info =
-                vk::TimelineSemaphoreSubmitInfo::default().signal_semaphore_values(&signal_values);
+            vk_timeline_info = vk::TimelineSemaphoreSubmitInfo::default()
+                .wait_semaphore_values(&wait_values)
+                .signal_semaphore_values(&signal_values);
             vk_info = vk_info.push_next(&mut vk_timeline_info);
         }
 
